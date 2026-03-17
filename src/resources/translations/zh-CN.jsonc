@@ -1,0 +1,9 @@
+{
+  "shop.prefix": "[gold]★[red] [商店][default]",
+
+  "module.player_models.item.temporary.name": "{0} ({1})",
+  "module.player_models.item.permanent.name": "{0} (永久)",
+
+  "module.player_models.error.permission": "你需要权限 [lightred]{1}[default] 才能购买 [lightred]{0}[default]。",
+  "module.player_models.preview.started": "预览模型 [lightyellow]{0}[default] 展示 [lightyellow]{1}[default] 秒。"
+}

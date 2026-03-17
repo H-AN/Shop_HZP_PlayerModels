@@ -1,0 +1,9 @@
+{
+  "shop.prefix": "[gold]\u2605[red] [Store][default]",
+
+  "item.temporary.name": "{0} ({1})",
+  "item.permanent.name": "{0} (Perm)",
+
+  "error.permission": "You need permission [lightred]{1}[default] to buy [lightred]{0}[default].",
+  "preview.started": "Preview model [lightyellow]{0}[default] shown for [lightyellow]{1}[default]s."
+}
