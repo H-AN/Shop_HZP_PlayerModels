@@ -8,6 +8,8 @@
 
 使用此插件必须安装ShopCore (https://github.com/SwiftlyS2-Plugins/ShopCore)
 
+可使用 创意工坊(例子) : 3639344021 来进行使用
+
 ---
 
 Reworked version of the Shop_PlayerModels module.
@@ -20,5 +22,7 @@ Fixed issues where team restrictions were not working properly, and added suppor
 
 This plugin requires ShopCore to be installed:
 https://github.com/SwiftlyS2-Plugins/ShopCore
+
+Can be used via Workshop (example): 3639344021
 
 
