@@ -8,7 +8,7 @@
     ".NETCoreApp,Version=v10.0": {
       "Shop_HZP_PlayerModels/1.0.0": {
         "dependencies": {
-          "SwiftlyS2.CS2": "1.2.1"
+          "SwiftlyS2.CS2": "1.2.2"
         },
         "runtime": {
           "Shop_HZP_PlayerModels.dll": {}
@@ -38,7 +38,7 @@
           }
         }
       },
-      "SwiftlyS2.CS2/1.2.1": {
+      "SwiftlyS2.CS2/1.2.2": {
         "dependencies": {
           "System.Data.SQLite.Core": "1.0.119"
         }
@@ -63,12 +63,12 @@
       "path": "stub.system.data.sqlite.core.netstandard/1.0.119",
       "hashPath": "stub.system.data.sqlite.core.netstandard.1.0.119.nupkg.sha512"
     },
-    "SwiftlyS2.CS2/1.2.1": {
+    "SwiftlyS2.CS2/1.2.2": {
       "type": "package",
       "serviceable": true,
-      "sha512": "sha512-MeXEnbTjDy37PZ6ZQv7pzd13Yvwem6daUOK6P6rKgpTMGmtw7AQEHq1TR1boXQVLWP4i2LMrEJKOxbgRUnbFaw==",
-      "path": "swiftlys2.cs2/1.2.1",
-      "hashPath": "swiftlys2.cs2.1.2.1.nupkg.sha512"
+      "sha512": "sha512-W5K1oKK891s3LzZsvrooLn4CN2xyRZoxnoObmpYg49ah+Y9bX9YaD0zgawGaXDQfyS6qBPsm56+dAgWLyxbUzg==",
+      "path": "swiftlys2.cs2/1.2.2",
+      "hashPath": "swiftlys2.cs2.1.2.2.nupkg.sha512"
     },
     "System.Data.SQLite.Core/1.0.119": {
       "type": "package",
