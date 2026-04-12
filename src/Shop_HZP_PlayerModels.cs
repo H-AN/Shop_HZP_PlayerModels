@@ -16,7 +16,7 @@ namespace ShopCore;
     Id = "Shop_HZP_PlayerModels",
     Name = "Shop PlayerModels",
     Author = "T3Marius & H-AN",
-    Version = "1.0.0",
+    Version = "1.0.1",
     Description = "ShopCore module with player model items Compatibility with HZP"
 )]
 public class Shop_PlayerModels : BasePlugin
