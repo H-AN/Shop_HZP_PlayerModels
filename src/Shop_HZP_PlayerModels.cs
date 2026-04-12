@@ -150,6 +150,16 @@ public class Shop_PlayerModels : BasePlugin
             return HookResult.Continue;
         }
 
+        var pawn = player.PlayerPawn;
+        if (pawn is null || !pawn.IsValid)
+        {
+            return HookResult.Continue;
+        }
+
+        if(pawn.TeamNum == 2)
+            return HookResult.Continue;
+
+
         Core.Scheduler.DelayBySeconds(0.2f, () =>
         {
             if (player is null || !player.IsValid || player.IsFakeClient)
