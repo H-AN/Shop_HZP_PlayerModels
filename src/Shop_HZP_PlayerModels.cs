@@ -414,10 +414,12 @@ public class Shop_PlayerModels : BasePlugin
             return;
         }
 
+        /*
         if (pawn.TeamNum == 2)
             return;
 
         ResetToTeamDefaultModel(player);
+        */
     }
 
     private bool TryGetEnabledRuntime(IPlayer player, out PlayerModelItemRuntime runtime)
