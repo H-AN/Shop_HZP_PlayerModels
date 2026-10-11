@@ -3,8 +3,10 @@
     "Settings": {
       "UseCorePrefix": true,
       "Category": "Visuals/Player Models",
-      "DefaultTModel": "characters/models/ctm_st6/ctm_st6_variante.vmdl",
-      "DefaultCtModel": "characters/models/ctm_st6/ctm_st6_variante.vmdl",
+      "DefaultTModel": "agents/models/tm_phoenix/tm_phoenix.vmdl",
+      "DefaultCtModel": "agents/models/ctm_sas/ctm_sas.vmdl",
+      // false 隐藏预览按钮并禁止预览。
+      "EnablePreview": true,
       "RotatePreviewModel": true
     },
     "Items": [

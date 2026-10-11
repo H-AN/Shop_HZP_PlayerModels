@@ -1,7 +1,9 @@
 using Microsoft.Extensions.Logging;
 using ShopCore.Contract;
 using SwiftlyS2.Shared;
+using SwiftlyS2.Shared.Commands;
 using SwiftlyS2.Shared.Events;
+using SwiftlyS2.Shared.EntitySystem;
 using SwiftlyS2.Shared.GameEventDefinitions;
 using SwiftlyS2.Shared.GameEvents;
 using SwiftlyS2.Shared.Misc;
@@ -16,13 +18,13 @@ namespace ShopCore;
     Id = "Shop_HZP_PlayerModels",
     Name = "Shop PlayerModels",
     Author = "T3Marius & H-AN",
-    Version = "1.0.1",
+    Version = "1.0.6",
     Description = "ShopCore module with player model items Compatibility with HZP"
 )]
 public class Shop_PlayerModels : BasePlugin
 {
     private const string ShopCoreInterfaceKey = "ShopCore.API.v2";
-    private const string ModulePluginId = "Shop_PlayerModels";
+    private const string ModulePluginId = "Shop_HZP_PlayerModels";
     private const string TemplateFileName = "playermodels_config.jsonc";
     private const string TemplateSectionName = "Main";
     private const string DefaultCategory = "Visuals/Player Models";
@@ -32,6 +34,8 @@ public class Shop_PlayerModels : BasePlugin
 
     private IShopCoreApiV2? shopApi;
     private bool handlersRegistered;
+    private volatile bool unloaded;
+    private int previewGeneration;
 
     private readonly HashSet<string> registeredItemIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> registeredItemOrder = new();
@@ -52,6 +56,7 @@ public class Shop_PlayerModels : BasePlugin
 
     public override void UseSharedInterface(IInterfaceManager interfaceManager)
     {
+        UnregisterItemsAndHandlers();
         shopApi = null;
 
         if (!interfaceManager.HasSharedInterface(ShopCoreInterfaceKey))
@@ -85,7 +90,12 @@ public class Shop_PlayerModels : BasePlugin
 
     public override void Load(bool hotReload)
     {
+        unloaded = false;
+        Core.Command.RegisterCommand("shopmodelsreload", ReloadModelConfiguration, true);
         Core.Event.OnPrecacheResource += OnPrecacheResource;
+        Core.Event.OnClientDisconnected += OnPreviewClientDisconnected;
+        Core.Event.OnClientPutInServer += OnPreviewClientPutInServer;
+        Core.Event.OnMapUnload += OnPreviewMapUnload;
 
         if (shopApi is not null && !handlersRegistered)
         {
@@ -94,28 +104,50 @@ public class Shop_PlayerModels : BasePlugin
 
         if (hotReload)
         {
-            foreach (var player in Core.PlayerManager.GetAllValidPlayers())
+            Core.Scheduler.NextWorldUpdate(() =>
             {
-                ApplyConfiguredOrDefaultModel(player);
-            }
+                if (unloaded) return;
+                foreach (var player in Core.PlayerManager.GetAllValidPlayers()) ApplyConfiguredOrDefaultModel(player);
+            });
         }
     }
 
     public override void Unload()
     {
+        unloaded = true;
         Core.Event.OnPrecacheResource -= OnPrecacheResource;
+        Core.Event.OnClientDisconnected -= OnPreviewClientDisconnected;
+        Core.Event.OnClientPutInServer -= OnPreviewClientPutInServer;
+        Core.Event.OnMapUnload -= OnPreviewMapUnload;
 
-        foreach (var player in Core.PlayerManager.GetAllValidPlayers())
-        {
-            ResetToTeamDefaultModel(player);
-        }
+        ResetModelsOnUnload(Core.PlayerManager.GetAllValidPlayers().Select(player => player.SessionId).ToArray());
 
         UnregisterItemsAndHandlers();
+    }
+
+    private void ReloadModelConfiguration(ICommandContext context)
+    {
+        if (context.IsSentByPlayer && (context.Sender is not { IsValid: true } player
+            || !Core.Permission.PlayerHasPermission(player.SteamID, "shopcore.admin.credits")))
+        {
+            context.Reply("Permission required: shopcore.admin.credits");
+            return;
+        }
+
+        if (unloaded || shopApi is null)
+        {
+            context.Reply("ShopCore API is unavailable.");
+            return;
+        }
+
+        RegisterItemsAndHandlers();
+        context.Reply($"PlayerModels config reloaded. RegisteredItems={registeredItemIds.Count}, PreviewEnabled={runtimeSettings.EnablePreview}. Reopen the shop menu.");
     }
 
     [GameEventHandler(HookMode.Post)]
     public HookResult OnPlayerTeam(EventPlayerTeam e)
     {
+        ClearPlayerPreview(e.UserId);
         if (e.OldTeam != 2 || e.Team != 3)
             return HookResult.Continue;
 
@@ -125,18 +157,7 @@ public class Shop_PlayerModels : BasePlugin
             return HookResult.Continue;
         }
 
-        Core.Scheduler.DelayBySeconds(0.2f, () =>
-        {
-            if (player is null || !player.IsValid || player.IsFakeClient)
-            {
-                return;
-            }
-
-            if(RoundEnd)
-                return;
-
-            ApplyConfiguredOrDefaultModel(player);
-        });
+        ScheduleConfiguredModel(player, requireActiveRound: true);
 
         return HookResult.Continue;
     }
@@ -144,6 +165,7 @@ public class Shop_PlayerModels : BasePlugin
     [GameEventHandler(HookMode.Post)]
     public HookResult OnPlayerSpawn(EventPlayerSpawn e)
     {
+        ClearPlayerPreview(e.UserId);
         var player = Core.PlayerManager.GetPlayer(e.UserId);
         if (player is null || !player.IsValid || player.IsFakeClient)
         {
@@ -160,23 +182,30 @@ public class Shop_PlayerModels : BasePlugin
             return HookResult.Continue;
 
 
-        Core.Scheduler.DelayBySeconds(0.2f, () =>
-        {
-            if (player is null || !player.IsValid || player.IsFakeClient)
-            {
-                return;
-            }
-
-            ApplyConfiguredOrDefaultModel(player);
-        });
+        ScheduleConfiguredModel(player);
 
         return HookResult.Continue;
+    }
+
+    private void ScheduleConfiguredModel(IPlayer player, bool requireActiveRound = false)
+    {
+        var connection = player.SessionId;
+        var pawnHandle = player.PlayerPawn?.Entity?.EntityHandle.Raw;
+        var timer = Core.Scheduler.DelayBySeconds(0.2f, () => Core.Scheduler.NextWorldUpdate(() =>
+        {
+            var currentPlayer = Core.PlayerManager.GetPlayerFromSessionId(connection);
+            if (unloaded || (requireActiveRound && RoundEnd) || currentPlayer?.IsValid != true
+                || currentPlayer.IsFakeClient || currentPlayer.PlayerPawn?.Entity?.EntityHandle.Raw != pawnHandle) return;
+            ApplyConfiguredOrDefaultModel(currentPlayer);
+        }));
+        Core.Scheduler.StopOnMapChange(timer);
     }
 
     [GameEventHandler(HookMode.Post)]
     public HookResult OnRoundStart(EventRoundStart e)
     {
         RoundEnd = false;
+        ClearAllPreviewEntities();
         return HookResult.Continue;
     }
 
@@ -184,6 +213,7 @@ public class Shop_PlayerModels : BasePlugin
     public HookResult OnRoundEnd(EventRoundEnd e)
     {
         RoundEnd = true;
+        ClearAllPreviewEntities();
         return HookResult.Continue;
     }
 
@@ -234,7 +264,9 @@ public class Shop_PlayerModels : BasePlugin
 
         if (moduleConfig.Items.Count == 0)
         {
+            var configuredSettings = moduleConfig.Settings;
             moduleConfig = CreateDefaultConfig();
+            moduleConfig.Settings = configuredSettings;
             category = moduleConfig.Settings.Category;
             runtimeSettings = moduleConfig.Settings;
 
@@ -276,13 +308,15 @@ public class Shop_PlayerModels : BasePlugin
         handlersRegistered = true;
 
         Core.Logger.LogInformation(
-            "Shop_PlayerModels initialized. RegisteredItems={RegisteredItems}",
-            registeredCount
+            "Shop_HZP_PlayerModels 1.0.6 initialized. RegisteredItems={RegisteredItems}, PreviewEnabled={PreviewEnabled}",
+            registeredCount,
+            runtimeSettings.EnablePreview
         );
     }
 
     private void UnregisterItemsAndHandlers()
     {
+        ClearAllPreviewEntities();
         if (!handlersRegistered || shopApi is null)
         {
             return;
@@ -302,7 +336,7 @@ public class Shop_PlayerModels : BasePlugin
         registeredItemIds.Clear();
         registeredItemOrder.Clear();
         itemRuntimeById.Clear();
-        ClearAllPreviewEntities();
+        itemDefinitionById.Clear();
         handlersRegistered = false;
     }
 
@@ -383,7 +417,7 @@ public class Shop_PlayerModels : BasePlugin
 
     private void OnItemPreview(IPlayer player, ShopItemDefinition item)
     {
-        if (!registeredItemIds.Contains(item.Id))
+        if (unloaded || !runtimeSettings.EnablePreview || !item.AllowPreview || !registeredItemIds.Contains(item.Id))
         {
             return;
         }
@@ -460,15 +494,25 @@ public class Shop_PlayerModels : BasePlugin
         return false;
     }
 
-    private void ResetToTeamDefaultModel(IPlayer player)
+    private async void ResetModelsOnUnload(ulong[] connections)
     {
-        var defaultModel = ResolveTeamDefaultModel(player);
-        if (string.IsNullOrWhiteSpace(defaultModel))
+        try
         {
-            return;
+            await Core.Scheduler.NextWorldUpdateAsync(() =>
+            {
+                foreach (var connection in connections)
+                {
+                    var player = Core.PlayerManager.GetPlayerFromSessionId(connection);
+                    if (player is null || !TryGetAlivePawn(player, out var pawn)) continue;
+                    var modelPath = ResolveTeamDefaultModel(player);
+                    if (!string.IsNullOrWhiteSpace(modelPath)) pawn.SetModel(modelPath);
+                }
+            });
         }
-
-        ApplyModel(player, defaultModel);
+        catch (Exception ex)
+        {
+            Core.Logger.LogWarning(ex, "Failed to reset player models on unload.");
+        }
     }
 
     private string ResolveTeamDefaultModel(IPlayer player)
@@ -494,18 +538,13 @@ public class Shop_PlayerModels : BasePlugin
             return;
         }
 
+        var connection = player.SessionId;
+        var pawnHandle = player.PlayerPawn?.Entity?.EntityHandle.Raw;
         Core.Scheduler.NextWorldUpdate(() =>
         {
-            if (player is null || !player.IsValid || player.IsFakeClient)
-            {
-                return;
-            }
-
-            var pawn = player.PlayerPawn;
-            if (pawn is null || !pawn.IsValid || pawn.LifeState != (int)LifeState_t.LIFE_ALIVE)
-            {
-                return;
-            }
+            var currentPlayer = Core.PlayerManager.GetPlayerFromSessionId(connection);
+            if (unloaded || currentPlayer?.IsValid != true
+                || currentPlayer.PlayerPawn?.Entity?.EntityHandle.Raw != pawnHandle || !TryGetAlivePawn(currentPlayer, out var pawn)) return;
 
             try
             {
@@ -513,37 +552,50 @@ public class Shop_PlayerModels : BasePlugin
             }
             catch (Exception ex)
             {
-                Core.Logger.LogWarning(ex, "Failed to apply model '{ModelPath}' to player {PlayerId}.", modelPath, player.PlayerID);
+                Core.Logger.LogWarning(ex, "Failed to apply model '{ModelPath}' to player {PlayerId}.", modelPath, currentPlayer.PlayerID);
             }
         });
     }
 
     private void SpawnPreviewModel(IPlayer player, string modelPath, string displayName)
     {
-        if (string.IsNullOrWhiteSpace(modelPath))
+        if (unloaded || !runtimeSettings.EnablePreview || string.IsNullOrWhiteSpace(modelPath))
         {
             return;
         }
 
+        modelPath = modelPath.Trim().Replace('\\', '/');
+        if (modelPath.EndsWith("_c", StringComparison.Ordinal)) modelPath = modelPath[..^2];
+        if (!player.IsValid || player.IsFakeClient) return;
+        var connection = player.SessionId;
+        var pawnHandle = player.PlayerPawn?.Entity?.EntityHandle.Raw;
+        var generation = previewGeneration;
         Core.Scheduler.NextWorldUpdate(() =>
         {
-            if (!TryGetAlivePawn(player, out var pawn))
+            var currentPlayer = Core.PlayerManager.GetPlayerFromSessionId(connection);
+            if (unloaded || !runtimeSettings.EnablePreview || generation != previewGeneration
+                || currentPlayer is null || !currentPlayer.IsValid
+                || currentPlayer.PlayerPawn?.Entity?.EntityHandle.Raw != pawnHandle || !TryGetAlivePawn(currentPlayer, out var pawn))
             {
                 return;
             }
 
-            var playerId = player.PlayerID;
-            var previewSession = ReservePreviewSession(playerId, out var previousPreviewEntityIndex);
-            if (previousPreviewEntityIndex != 0)
+            if (!Core.GameFileSystem.FileExists(modelPath + "_c", "GAME"))
             {
-                DespawnPreviewEntityByIndex(previousPreviewEntityIndex);
+                Core.Logger.LogWarning("Preview model resource '{ModelPath}' is unavailable; no entity will be spawned.", modelPath);
+                return;
             }
 
+            var playerId = currentPlayer.PlayerID;
+            var state = ReservePreviewSession(playerId, out var previousState);
+            if (previousState is not null) DespawnPreviewEntity(previousState);
+
             CDynamicProp? preview = null;
+            var previewHandle = CHandle<CDynamicProp>.Invalid;
             try
             {
                 var origin = pawn.AbsOrigin ?? Vector.Zero;
-                var rotation = pawn.AbsRotation ?? QAngle.Zero;
+                var rotation = pawn.EyeAngles;
                 var yawRadians = rotation.Y * (MathF.PI / 180f);
                 var previewPosition = new Vector(
                     origin.X + (MathF.Cos(yawRadians) * PreviewDistance),
@@ -551,50 +603,76 @@ public class Shop_PlayerModels : BasePlugin
                     origin.Z
                 );
                 var initialYaw = NormalizeYaw(rotation.Y + 180f);
-                var previewRotation = new QAngle(rotation.X, initialYaw, rotation.Z);
+                var previewRotation = new QAngle(0, initialYaw, 0);
 
                 preview = Core.EntitySystem.CreateEntityByDesignerName<CDynamicProp>("prop_dynamic_override");
                 if (preview is null || !preview.IsValid)
                 {
+                    ClearPreviewSessionIfCurrent(playerId, state.SessionId);
                     return;
                 }
 
-                // Keep preview model facing player by default; optional full-spin is controlled by config.
-                preview.Teleport(previewPosition, previewRotation, Vector.Zero);
-                preview.DispatchSpawn();
-                preview.SetModel(modelPath);
-                ConfigurePreviewVisibility(preview, player);
-                ConfigurePreviewGlow(preview);
-                SetPreviewEntityIndex(playerId, previewSession, preview.Index);
+                // 在生成时设置模型和无碰撞标志，避免未生成实体的 SetModel 及物理速度写入。
+                using var keyValues = new CEntityKeyValues();
+                keyValues.SetString("model", modelPath);
+                keyValues.SetVector("origin", previewPosition);
+                keyValues.SetQAngle("angles", previewRotation);
+                keyValues.SetInt32("solid", 0);
+                keyValues.SetInt32("spawnflags", 256);
+                preview.Collision.SolidType = SolidType_t.SOLID_NONE;
+                preview.Collision.SolidFlags |= 4; // FSOLID_NOT_SOLID
+                state.EntityHandle = Core.EntitySystem.GetRefEHandle(preview);
+                preview.DispatchSpawn(keyValues);
+                if (!preview.IsValid)
+                {
+                    ClearPreviewSessionIfCurrent(playerId, state.SessionId);
+                    return;
+                }
+                preview.Teleport(previewPosition, previewRotation, null);
+                ConfigurePreviewVisibility(preview, currentPlayer);
+                previewHandle = Core.EntitySystem.GetRefEHandle(preview);
+                state.EntityHandle = previewHandle;
+
+                if (!IsCurrentPreviewSession(playerId, state.SessionId))
+                {
+                    DespawnPreviewEntity(state);
+                    return;
+                }
 
                 if (runtimeSettings.RotatePreviewModel)
                 {
-                    RotatePreviewModel(playerId, previewSession, preview, previewPosition, previewRotation);
+                    state.RotationTimer = RotatePreviewModel(playerId, state.SessionId, previewHandle, previewRotation);
                 }
 
-                player.SendChat($"{GetPrefix(player)} {Core.Translation.GetPlayerLocalizer(player)["preview.started", displayName, (int)PreviewDurationSeconds]}");
+                currentPlayer.SendChat($"{GetPrefix(currentPlayer)} {Core.Translation.GetPlayerLocalizer(currentPlayer)["preview.started", displayName, (int)PreviewDurationSeconds]}");
             }
             catch (Exception ex)
             {
                 Core.Logger.LogWarning(ex, "Failed to spawn player model preview for '{DisplayName}'.", displayName);
-                ClearPreviewSessionIfCurrent(playerId, previewSession);
+                if (preview?.IsValid == true)
+                {
+                    try { preview.Despawn(); }
+                    catch (Exception cleanupError) { Core.Logger.LogWarning(cleanupError, "Failed to clean up incomplete preview."); }
+                }
+                ClearPreviewSessionIfCurrent(playerId, state.SessionId);
                 return;
             }
 
-            Core.Scheduler.DelayBySeconds(PreviewDurationSeconds, () =>
+            state.ExpiryTimer = Core.Scheduler.DelayBySeconds(PreviewDurationSeconds, () =>
             {
                 Core.Scheduler.NextWorldUpdate(() =>
                 {
-                    if (!IsCurrentPreviewSession(playerId, previewSession))
+                    if (!IsCurrentPreviewSession(playerId, state.SessionId))
                     {
                         return;
                     }
 
                     try
                     {
-                        if (preview is not null && preview.IsValid)
+                        var currentPreview = previewHandle.Value;
+                        if (currentPreview?.IsValid == true)
                         {
-                            preview.Despawn();
+                            currentPreview.Despawn();
                         }
                     }
                     catch (Exception ex)
@@ -603,40 +681,25 @@ public class Shop_PlayerModels : BasePlugin
                     }
                     finally
                     {
-                        ClearPreviewSessionIfCurrent(playerId, previewSession);
+                        ClearPreviewSessionIfCurrent(playerId, state.SessionId);
                     }
                 });
             });
+            Core.Scheduler.StopOnMapChange(state.ExpiryTimer);
+            if (!IsCurrentPreviewSession(playerId, state.SessionId)) CancelPreviewTimers(state);
         });
     }
 
-    private long ReservePreviewSession(int playerId, out uint previousEntityIndex)
+    private PlayerModelPreviewState ReservePreviewSession(int playerId, out PlayerModelPreviewState? previousState)
     {
         lock (previewSync)
         {
-            previousEntityIndex = 0;
-            if (previewStateByPlayerId.TryGetValue(playerId, out var previousState))
-            {
-                previousEntityIndex = previousState.EntityIndex;
-            }
+            previewStateByPlayerId.TryGetValue(playerId, out previousState);
 
             previewSessionCounter++;
-            var session = previewSessionCounter;
-            previewStateByPlayerId[playerId] = new PlayerModelPreviewState(session, 0);
-            return session;
-        }
-    }
-
-    private void SetPreviewEntityIndex(int playerId, long sessionId, uint entityIndex)
-    {
-        lock (previewSync)
-        {
-            if (!previewStateByPlayerId.TryGetValue(playerId, out var state) || state.SessionId != sessionId)
-            {
-                return;
-            }
-
-            previewStateByPlayerId[playerId] = state with { EntityIndex = entityIndex };
+            var state = new PlayerModelPreviewState(previewSessionCounter);
+            previewStateByPlayerId[playerId] = state;
+            return state;
         }
     }
 
@@ -650,51 +713,70 @@ public class Shop_PlayerModels : BasePlugin
 
     private void ClearPreviewSessionIfCurrent(int playerId, long sessionId)
     {
+        PlayerModelPreviewState? removedState = null;
         lock (previewSync)
         {
             if (previewStateByPlayerId.TryGetValue(playerId, out var state) && state.SessionId == sessionId)
             {
                 previewStateByPlayerId.Remove(playerId);
+                removedState = state;
             }
         }
+        if (removedState is not null) CancelPreviewTimers(removedState);
     }
 
-    private void DespawnPreviewEntityByIndex(uint entityIndex)
+    private static void CancelPreviewTimers(PlayerModelPreviewState state)
     {
-        if (entityIndex == 0)
-        {
-            return;
-        }
+        // StopOnMapChange 仍持有令牌回调，由调度器管理其生命周期，此处只取消。
+        state.RotationTimer?.Cancel();
+        state.ExpiryTimer?.Cancel();
+    }
 
+    private void DespawnPreviewEntity(PlayerModelPreviewState state)
+    {
+        CancelPreviewTimers(state);
         try
         {
-            var existing = Core.EntitySystem.GetEntityByIndex<CDynamicProp>(entityIndex);
-            if (existing is not null && existing.IsValid)
+            // 句柄同时校验实体索引和序列号，不能误删复用索引后的其他实体。
+            var existing = state.EntityHandle.Value;
+            if (existing?.IsValid == true)
             {
                 existing.Despawn();
             }
         }
         catch (Exception ex)
         {
-            Core.Logger.LogWarning(ex, "Failed to despawn existing preview entity index {EntityIndex}.", entityIndex);
+            Core.Logger.LogWarning(ex, "Failed to despawn existing preview entity {EntityHandle}.", state.EntityHandle.Raw);
         }
     }
 
     private void ClearAllPreviewEntities()
     {
-        uint[] entityIndexes;
+        PlayerModelPreviewState[] entityStates;
         lock (previewSync)
         {
-            entityIndexes = previewStateByPlayerId.Values
-                .Select(static state => state.EntityIndex)
-                .Where(static index => index != 0)
-                .ToArray();
+            previewGeneration++;
+            entityStates = previewStateByPlayerId.Values.ToArray();
             previewStateByPlayerId.Clear();
         }
 
-        foreach (var entityIndex in entityIndexes)
+        foreach (var state in entityStates) CancelPreviewTimers(state);
+        if (entityStates.Length > 0) CleanupPreviewEntities(entityStates);
+    }
+
+    private async void CleanupPreviewEntities(PlayerModelPreviewState[] states)
+    {
+        try
         {
-            DespawnPreviewEntityByIndex(entityIndex);
+            // 卸载会取消插件范围的普通回调，使用全局主线程任务完成最后一次清理。
+            await Core.Scheduler.NextWorldUpdateAsync(() =>
+            {
+                foreach (var state in states) DespawnPreviewEntity(state);
+            });
+        }
+        catch (Exception ex)
+        {
+            Core.Logger.LogWarning(ex, "Failed to schedule preview cleanup.");
         }
     }
 
@@ -727,7 +809,7 @@ public class Shop_PlayerModels : BasePlugin
 
         try
         {
-            // Hide for everyone, then explicitly allow only the preview owner.
+            // 隐藏所有槽位的预览，仅向发起预览的玩家发送。
             preview.SetTransmitState(false);
             preview.SetTransmitState(true, previewOwner.PlayerID);
         }
@@ -737,85 +819,69 @@ public class Shop_PlayerModels : BasePlugin
         }
     }
 
-    private void ConfigurePreviewGlow(CDynamicProp preview)
-    {
-        if (preview is null || !preview.IsValid)
-        {
-            return;
-        }
-
-        try
-        {
-            // Dynamic prop glow properties.
-            preview.InitialGlowState = 1;
-            preview.GlowRangeMin = 0;
-            preview.GlowRange = 2048;
-            preview.GlowTeam = -1;
-            preview.GlowColor = new Color(255, 180, 40, 255);
-
-            // Base model glow properties.
-            var glow = preview.Glow;
-            glow.GlowType = 3;
-            glow.GlowTeam = -1;
-            glow.GlowRangeMin = 0;
-            glow.GlowRange = 2048;
-            glow.GlowColorOverride = new Color(255, 180, 40, 255);
-            glow.GlowColorOverrideUpdated();
-            glow.GlowTypeUpdated();
-            glow.GlowTeamUpdated();
-            glow.GlowRangeMinUpdated();
-            glow.GlowRangeUpdated();
-
-            glow.EligibleForScreenHighlight = true;
-            glow.EligibleForScreenHighlightUpdated();
-            glow.Glowing = true;
-            preview.GlowUpdated();
-        }
-        catch (Exception ex)
-        {
-            Core.Logger.LogWarning(ex, "Failed to configure glow on preview model entity.");
-        }
-    }
-
-    private void RotatePreviewModel(int playerId, long previewSession, CDynamicProp preview, Vector origin, QAngle initialRotation)
+    private CancellationTokenSource RotatePreviewModel(int playerId, long previewSession, CHandle<CDynamicProp> previewHandle, QAngle initialRotation)
     {
         var steps = (int)MathF.Ceiling(PreviewDurationSeconds / PreviewRotateIntervalSeconds);
-        if (steps <= 0)
+        var rotationTimer = Core.Scheduler.AddTimer(timer =>
         {
-            return;
-        }
+            if (unloaded || !IsCurrentPreviewSession(playerId, previewSession) || timer.ExecutionCount >= (ulong)steps)
+                return SwiftlyS2.Shared.Scheduler.TimerStep.Stop();
 
-        for (var step = 1; step <= steps; step++)
-        {
-            var currentStep = step;
-            var progress = currentStep / (float)steps;
-            var targetYaw = NormalizeYaw(initialRotation.Y + (360f * progress));
-
-            Core.Scheduler.DelayBySeconds(currentStep * PreviewRotateIntervalSeconds, () =>
+            var targetYaw = NormalizeYaw(initialRotation.Y + (360f * timer.ExecutionCount / steps));
+            Core.Scheduler.NextWorldUpdate(() =>
             {
-                Core.Scheduler.NextWorldUpdate(() =>
-                {
-                    if (!IsCurrentPreviewSession(playerId, previewSession))
-                    {
-                        return;
-                    }
-
-                    if (preview is null || !preview.IsValid)
-                    {
-                        return;
-                    }
-
-                    try
-                    {
-                        preview.Teleport(origin, new QAngle(initialRotation.X, targetYaw, initialRotation.Z), Vector.Zero);
-                    }
-                    catch (Exception ex)
-                    {
-                        Core.Logger.LogWarning(ex, "Failed rotating preview player model entity.");
-                    }
-                });
+                if (unloaded || !IsCurrentPreviewSession(playerId, previewSession)) return;
+                var preview = previewHandle.Value;
+                if (preview?.IsValid != true) return;
+                try { preview.Teleport(null, new QAngle(0, targetYaw, 0), null); }
+                catch (Exception ex) { Core.Logger.LogWarning(ex, "Failed rotating preview player model entity."); }
             });
+            return SwiftlyS2.Shared.Scheduler.TimerStep.WaitForSeconds(PreviewRotateIntervalSeconds);
+        });
+        Core.Scheduler.StopOnMapChange(rotationTimer);
+        return rotationTimer;
+    }
+
+    private void ClearPlayerPreview(int playerId)
+    {
+        PlayerModelPreviewState? state;
+        lock (previewSync)
+        {
+            if (!previewStateByPlayerId.Remove(playerId, out state)) return;
         }
+        CancelPreviewTimers(state);
+        CleanupPreviewEntities([state]);
+    }
+
+    private void OnPreviewClientPutInServer(IOnClientPutInServerEvent e)
+    {
+        ClearPlayerPreview(e.PlayerId);
+        var connection = Core.PlayerManager.GetPlayer(e.PlayerId)?.SessionId;
+        if (connection is null) return;
+        Core.Scheduler.NextWorldUpdate(() =>
+        {
+            var player = Core.PlayerManager.GetPlayerFromSessionId(connection.Value);
+            if (unloaded || player?.IsValid != true) return;
+            lock (previewSync)
+            {
+                foreach (var (ownerId, state) in previewStateByPlayerId)
+                {
+                    if (ownerId == player.PlayerID) continue;
+                    var preview = state.EntityHandle.Value;
+                    if (preview?.IsValid == true) preview.SetTransmitState(false, player.PlayerID);
+                }
+            }
+        });
+    }
+
+    private void OnPreviewClientDisconnected(IOnClientDisconnectedEvent e) => ClearPlayerPreview(e.PlayerId);
+    private void OnPreviewMapUnload(IOnMapUnloadEvent e) => ClearAllPreviewEntities();
+
+    [GameEventHandler(HookMode.Post)]
+    public HookResult OnPreviewPlayerDeath(EventPlayerDeath e)
+    {
+        ClearPlayerPreview(e.UserId);
+        return HookResult.Continue;
     }
 
     private static float NormalizeYaw(float yaw)
@@ -922,7 +988,8 @@ public class Shop_PlayerModels : BasePlugin
             Type: itemType,
             Team: team,
             Enabled: itemTemplate.Enabled,
-            CanBeSold: itemTemplate.CanBeSold
+            CanBeSold: itemTemplate.CanBeSold,
+            AllowPreview: runtimeSettings.EnablePreview
         );
 
         runtime = new PlayerModelItemRuntime(
@@ -1081,10 +1148,13 @@ internal readonly record struct PlayerModelItemRuntime(
     string RequiredPermission
 );
 
-internal readonly record struct PlayerModelPreviewState(
-    long SessionId,
-    uint EntityIndex
-);
+internal sealed class PlayerModelPreviewState(long sessionId)
+{
+    public long SessionId { get; } = sessionId;
+    public CHandle<CDynamicProp> EntityHandle { get; set; } = CHandle<CDynamicProp>.Invalid;
+    public CancellationTokenSource? RotationTimer { get; set; }
+    public CancellationTokenSource? ExpiryTimer { get; set; }
+}
 
 internal sealed class PlayerModelsModuleConfig
 {
@@ -1098,6 +1168,7 @@ internal sealed class PlayerModelsModuleSettings
     public string Category { get; set; } = "Visuals/Player Models";
     public string DefaultTModel { get; set; } = "characters/models/tm_phoenix/tm_phoenix.vmdl";
     public string DefaultCtModel { get; set; } = "characters/models/ctm_sas/ctm_sas.vmdl";
+    public bool EnablePreview { get; set; } = true;
     public bool RotatePreviewModel { get; set; } = true;
 }
 
